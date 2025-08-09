@@ -513,7 +513,7 @@ def get_entities_with_new_data(since_timestamp: str):
     logger.info(f"Entities requiring an update: {final_updates}")
     return final_updates
 
-# In database.py, add these two functions at the very end of the file
+# In database.py, replace the old cache functions with these new ones.
 
 def save_predictions_to_cache(df: pd.DataFrame):
     """Saves the prediction DataFrame to the cache table."""
@@ -521,13 +521,16 @@ def save_predictions_to_cache(df: pd.DataFrame):
         logger.warning("Attempted to save an empty DataFrame to prediction cache. Skipping.")
         return
 
-    logger.info(f"Saving {len(df)} predictions to the persistent database cache...")
+    # FIX: Work on a copy of the dataframe to prevent side effects.
+    df_to_save = df.copy()
+
+    logger.info(f"Saving {len(df_to_save)} predictions to the persistent database cache...")
     try:
         with sqlite3.connect(Paths.DATABASE_PATH) as conn:
             # Add the current timestamp to every row
-            df['last_computed_utc'] = datetime.now(timezone.utc).isoformat()
+            df_to_save['last_computed_utc'] = datetime.now(timezone.utc).isoformat()
             # Use 'replace' to clear the old cache and insert the new data
-            df.to_sql(Settings.PREDICTIONS_CACHE_TABLE_NAME, conn, if_exists='replace', index=False)
+            df_to_save.to_sql(Settings.PREDICTIONS_CACHE_TABLE_NAME, conn, if_exists='replace', index=False)
             logger.info("Successfully saved predictions to cache.")
     except Exception as e:
         logger.error(f"Failed to save predictions to cache: {e}", exc_info=True)
@@ -541,21 +544,24 @@ def load_predictions_from_cache(max_age_seconds: int = 3600) -> pd.DataFrame | N
     logger.info("Attempting to load predictions from persistent database cache...")
     try:
         with sqlite3.connect(Paths.DATABASE_PATH) as conn:
-            # Check if the table exists and is not empty
+            # Check if the table exists
             cursor = conn.cursor()
             cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name=?", (Settings.PREDICTIONS_CACHE_TABLE_NAME,))
             if cursor.fetchone() is None:
                 logger.warning("Prediction cache table does not exist. Cache miss.")
                 return None
 
-            # Get the timestamp of the last computation
-            sample_ts_str = pd.read_sql(f"SELECT last_computed_utc FROM {Settings.PREDICTIONS_CACHE_TABLE_NAME} LIMIT 1", conn).iloc[0,0]
-            if not sample_ts_str:
+            # FIX: More robustly get the most recent timestamp from the entire cache.
+            query = f"SELECT MAX(last_computed_utc) FROM {Settings.PREDICTIONS_CACHE_TABLE_NAME}"
+            latest_ts_str = pd.read_sql(query, conn).iloc[0, 0]
+
+            # If the table is empty, the result will be None.
+            if not latest_ts_str:
                 logger.info("Prediction cache is empty. Cache miss.")
                 return None
-
-            last_computed_dt = datetime.fromisoformat(sample_ts_str)
-
+            
+            last_computed_dt = datetime.fromisoformat(latest_ts_str)
+            
             # Check if the cache is stale
             age_seconds = (datetime.now(timezone.utc) - last_computed_dt).total_seconds()
             if age_seconds > max_age_seconds:
@@ -565,7 +571,7 @@ def load_predictions_from_cache(max_age_seconds: int = 3600) -> pd.DataFrame | N
             # If cache is fresh, load the entire table
             logger.info(f"Prediction cache is fresh. Loading {age_seconds:.0f}s old data.")
             df = pd.read_sql(f"SELECT * FROM {Settings.PREDICTIONS_CACHE_TABLE_NAME}", conn)
-
+            
             # Convert date columns back to datetime objects
             for col in ['last_service_date', 'predicted_date']:
                 if col in df.columns:
@@ -574,6 +580,5 @@ def load_predictions_from_cache(max_age_seconds: int = 3600) -> pd.DataFrame | N
             return df
 
     except Exception as e:
-        # If any error occurs (e.g., table doesn't exist, is empty), treat it as a cache miss
         logger.error(f"Could not load predictions from cache: {e}", exc_info=True)
         return None

@@ -32,20 +32,32 @@ def load_service_config():
         return None
 
 
+# In prediction_engine.py, replace the old function with this one
+
 def get_full_history_for_metric(crane_number, tag_name):
     """
     Retrieves the entire time-series history for a specific metric for a crane.
+    FIX: Uses TRIM() to make the query robust against whitespace issues.
     """
     logger.debug(f"Fetching full history for metric. Crane: {crane_number}, Tag: {tag_name}")
     if not tag_name or pd.isna(tag_name):
         logger.warning("No tag_name provided to get_full_history_for_metric. Returning empty DataFrame.")
         return pd.DataFrame()
     try:
+        # Use .strip() on parameters for extra safety
+        p_crane_number = str(crane_number).strip()
+        p_tag_name = str(tag_name).strip()
+
         with sqlite3.connect(Paths.DATABASE_PATH) as conn:
-            df = pd.read_sql_query(
-                f"SELECT timestamp, tag_value FROM {Settings.STATS_TABLE_NAME} WHERE crane_number = ? AND tag_name = ? ORDER BY timestamp ASC",
-                conn, params=(crane_number, tag_name)
-            )
+            # Use TRIM() on the database columns to ignore leading/trailing spaces
+            query = f"""
+                SELECT timestamp, tag_value 
+                FROM {Settings.STATS_TABLE_NAME} 
+                WHERE TRIM(crane_number) = ? AND TRIM(tag_name) = ? 
+                ORDER BY timestamp ASC
+            """
+            df = pd.read_sql_query(query, conn, params=(p_crane_number, p_tag_name))
+
             if not df.empty:
                 logger.debug(f"Found {len(df)} historical records.")
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
@@ -56,24 +68,26 @@ def get_full_history_for_metric(crane_number, tag_name):
         logger.error(f"DB Error on get_full_history_for_metric for {crane_number}/{tag_name}: {e}")
         return pd.DataFrame()
 
+# In prediction_engine.py, replace the old function with this one
+
 def get_spreader_usage_history(spreader_id, usage_tag_name):
     """
     Aggregates the total usage for a specific metric on a spreader as it moves between cranes.
     Handles new alphanumeric spreader IDs.
+    FIX: Uses TRIM() to make the query robust against whitespace issues.
     """
     logger.info(f"Building usage history for Spreader ID: {spreader_id}, Metric: {usage_tag_name}")
     try:
-        # FIX: Ensure spreader_id is treated as an integer for the database query.
         numeric_id = int(spreader_id)
 
         with sqlite3.connect(Paths.DATABASE_PATH) as conn:
+            # Use TRIM on tag_name for robust matching
             location_query = f"""
                 SELECT timestamp, crane_number
                 FROM {Settings.STATS_TABLE_NAME}
-                WHERE tag_name = 'Spreader ID Number' AND tag_value = ?
+                WHERE TRIM(tag_name) = 'Spreader ID Number' AND tag_value = ?
                 ORDER BY timestamp ASC
             """
-            # Use the parsed numeric_id for the query
             spreader_locations_df = pd.read_sql_query(location_query, conn, params=(numeric_id,))
 
             if spreader_locations_df.empty:
@@ -92,16 +106,20 @@ def get_spreader_usage_history(spreader_id, usage_tag_name):
             logger.debug(f"Identified {len(periods)} periods of spreader attachment across different cranes.")
 
             all_usage_segments = []
-            unique_cranes_used = periods['crane_number'].unique().tolist()
             
+            # Use .strip() on the parameter for extra safety
+            p_usage_tag_name = str(usage_tag_name).strip()
+            unique_cranes_used = [str(c).strip() for c in periods['crane_number'].unique()]
+
             placeholders = ','.join('?' for _ in unique_cranes_used)
+            # Use TRIM on tag_name and crane_number for robust matching
             usage_query = f"""
                 SELECT timestamp, tag_value, crane_number
                 FROM {Settings.STATS_TABLE_NAME}
-                WHERE tag_name = ? AND crane_number IN ({placeholders})
+                WHERE TRIM(tag_name) = ? AND TRIM(crane_number) IN ({placeholders})
                 ORDER BY timestamp ASC
             """
-            params = [usage_tag_name] + unique_cranes_used
+            params = [p_usage_tag_name] + unique_cranes_used
             full_usage_df = pd.read_sql_query(usage_query, conn, params=params)
             
             if full_usage_df.empty:
@@ -133,7 +151,6 @@ def get_spreader_usage_history(spreader_id, usage_tag_name):
     except Exception as e:
         logger.error(f"DB Error on get_spreader_usage_history for {spreader_id}/{usage_tag_name}: {e}", exc_info=True)
         return pd.DataFrame()
-
 
 def calculate_average_daily_usage(full_history_df):
     """
