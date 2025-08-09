@@ -4,39 +4,34 @@
 # REFACTOR: Centralized path and logger configuration.
 
 import json
-import os
-from config import Paths, logger # Import from the new centralized config
+from config import Paths, logger
+
+USERS_DATA = {
+  "users": [
+    {
+      "username": "user",
+      "password": "password",
+      "role": "viewer"
+    },
+    {
+      "username": "manager",
+      "password": "manager123",
+      "role": "admin"
+    },
+    {
+      "username": "admin",
+      "password": "admin123",
+      "role": "admin"
+    }
+  ]
+}
 
 def load_users():
     """
-    Reads the users.json file and returns the list of user objects.
-
-    This function is responsible for safely loading user data from the JSON file.
-    It handles cases where the file might not exist or is improperly formatted.
-
-    Returns:
-        list: A list of user dictionaries. Each dictionary should contain
-              keys like "username", "password", and "role".
-              Returns an empty list if the file cannot be read or is empty.
+    Returns the hardcoded list of user objects.
     """
-    logger.debug(f"Attempting to load users from: {Paths.USERS_FILE_PATH}")
-    if not os.path.exists(Paths.USERS_FILE_PATH):
-        logger.error(f"users.json not found at {Paths.USERS_FILE_PATH}")
-        return []
-    try:
-        with open(Paths.USERS_FILE_PATH, 'r') as f:
-            data = json.load(f)
-            # .get("users", []) is a safe way to access the list.
-            # If the "users" key doesn't exist, it returns an empty list instead of crashing.
-            users = data.get("users", [])
-            logger.debug(f"Successfully loaded {len(users)} user(s).")
-            return users
-    except json.JSONDecodeError as e:
-        logger.critical(f"Failed to decode users.json. It might be malformed. Error: {e}")
-        return []
-    except Exception as e:
-        logger.critical(f"An unexpected error occurred while loading users: {e}")
-        return []
+    logger.debug("Loading users from embedded data.")
+    return USERS_DATA.get("users", [])
 
 def verify_admin_password(password: str) -> str | None:
     """
