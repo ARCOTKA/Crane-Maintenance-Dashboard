@@ -1,0 +1,10 @@
+Fleet #,Vehicle Type,Scheduled Start Date,Scheduled End Date,Service Type,Service Alias,Repairer Notes
+CASC01 EAST,CRANE,28/06/2025 07:00,28/06/2025 11:00,PM,PM-CR-01,Valid Record
+SP012,SPREADER,03/07/2025 07:00,03/07/2025 11:00,PM,PM-SP-01,Another Valid Record
+CASC01 EAST,CRANE,28/06/2025 07:00,28/06/2025 11:00,PM,PM-CR-01,Duplicate of first valid record
+CRANE-XXX,CRANE,11/07/2025 07:00,11/07/2025 11:00,PM,PM-CR-03,Error: Fleet # not in map
+,CRANE,10/07/2025 07:00,10/07/2025 11:00,PM,PM-CR-04,Error: Missing Fleet #
+ASC01,CRANE,2025-07-12 07:00,12/07/2025 11:00,PM,PM-CR-05,Error: Invalid Date Format
+ASC02,CRANE,13/07/2025 11:00,13/07/2025 07:00,PM,PM-CR-06,Error: End date before start
+ASC03,TRUCK,14/07/2025 07:00,14/07/2025 11:00,PM,PM-CR-07,Error: Invalid Vehicle Type
+CASC02 EAST,CRANE,13/08/2025 10:00,13/08/2025 14:00,PM,PM-CR-08,Error: Overlaps with existing
