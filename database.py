@@ -4,8 +4,23 @@
 
 import sqlite3
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timezone
 from config import Paths, Settings, logger # Import from the new centralized config
+
+
+# In database.py
+
+class Settings:
+    """A class to hold all application-wide settings and configurable variables."""
+    # --- Dashboard Settings ---
+    DATE_FORMAT = "%d/%m/%y"
+    CONFLICT_WINDOW_MINUTES = 90
+
+    # --- Database Table Names ---
+    STATS_TABLE_NAME = "crane_stats"
+    SERVICE_LOG_TABLE_NAME = "service_log"
+    MAINTENANCE_WINDOWS_TABLE_NAME = "maintenance_windows"
+    PREDICTIONS_CACHE_TABLE_NAME = "predictions_cache" # <-- ADD THIS LINE
 
 def _run_migration_scripts(conn):
     """Runs data migration scripts for schema changes."""
@@ -117,6 +132,27 @@ def init_db():
                 )''')
             conn.commit()
             logger.info("Database tables checked/created successfully.")
+            cursor.execute(f'''
+            CREATE TABLE IF NOT EXISTS {Settings.PREDICTIONS_CACHE_TABLE_NAME} (
+                entity_id TEXT,
+                task_id TEXT,
+                unit TEXT,
+                current_value REAL,
+                service_limit REAL,
+                service_interval_days REAL,
+                last_service_date TEXT,
+                avg_daily_usage REAL,
+                predicted_date TEXT,
+                action_required TEXT,
+                due_reason TEXT,
+                duration_hours REAL,
+                error TEXT,
+                entity_type TEXT,
+                entity_display_name TEXT,
+                last_computed_utc TEXT
+            )''')
+        conn.commit()
+        logger.info("Database tables checked/created successfully.")
     except sqlite3.Error as e:
         logger.critical(f"Database error during initialization: {e}")
         raise
@@ -476,3 +512,68 @@ def get_entities_with_new_data(since_timestamp: str):
     }
     logger.info(f"Entities requiring an update: {final_updates}")
     return final_updates
+
+# In database.py, add these two functions at the very end of the file
+
+def save_predictions_to_cache(df: pd.DataFrame):
+    """Saves the prediction DataFrame to the cache table."""
+    if df.empty:
+        logger.warning("Attempted to save an empty DataFrame to prediction cache. Skipping.")
+        return
+
+    logger.info(f"Saving {len(df)} predictions to the persistent database cache...")
+    try:
+        with sqlite3.connect(Paths.DATABASE_PATH) as conn:
+            # Add the current timestamp to every row
+            df['last_computed_utc'] = datetime.now(timezone.utc).isoformat()
+            # Use 'replace' to clear the old cache and insert the new data
+            df.to_sql(Settings.PREDICTIONS_CACHE_TABLE_NAME, conn, if_exists='replace', index=False)
+            logger.info("Successfully saved predictions to cache.")
+    except Exception as e:
+        logger.error(f"Failed to save predictions to cache: {e}", exc_info=True)
+
+
+def load_predictions_from_cache(max_age_seconds: int = 3600) -> pd.DataFrame | None:
+    """
+    Loads the prediction DataFrame from the cache table if it's not stale.
+    Returns None if the cache is empty, stale, or an error occurs.
+    """
+    logger.info("Attempting to load predictions from persistent database cache...")
+    try:
+        with sqlite3.connect(Paths.DATABASE_PATH) as conn:
+            # Check if the table exists and is not empty
+            cursor = conn.cursor()
+            cursor.execute(f"SELECT name FROM sqlite_master WHERE type='table' AND name=?", (Settings.PREDICTIONS_CACHE_TABLE_NAME,))
+            if cursor.fetchone() is None:
+                logger.warning("Prediction cache table does not exist. Cache miss.")
+                return None
+
+            # Get the timestamp of the last computation
+            sample_ts_str = pd.read_sql(f"SELECT last_computed_utc FROM {Settings.PREDICTIONS_CACHE_TABLE_NAME} LIMIT 1", conn).iloc[0,0]
+            if not sample_ts_str:
+                logger.info("Prediction cache is empty. Cache miss.")
+                return None
+
+            last_computed_dt = datetime.fromisoformat(sample_ts_str)
+
+            # Check if the cache is stale
+            age_seconds = (datetime.now(timezone.utc) - last_computed_dt).total_seconds()
+            if age_seconds > max_age_seconds:
+                logger.info(f"Prediction cache is stale (age: {age_seconds:.0f}s > max: {max_age_seconds}s). Cache miss.")
+                return None
+
+            # If cache is fresh, load the entire table
+            logger.info(f"Prediction cache is fresh. Loading {age_seconds:.0f}s old data.")
+            df = pd.read_sql(f"SELECT * FROM {Settings.PREDICTIONS_CACHE_TABLE_NAME}", conn)
+
+            # Convert date columns back to datetime objects
+            for col in ['last_service_date', 'predicted_date']:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors='coerce')
+
+            return df
+
+    except Exception as e:
+        # If any error occurs (e.g., table doesn't exist, is empty), treat it as a cache miss
+        logger.error(f"Could not load predictions from cache: {e}", exc_info=True)
+        return None

@@ -204,11 +204,13 @@ def predict_service_date(entity_id, entity_type, task_id, custom_limit=None):
     last_service_record = database.get_last_service_record(entity_id, entity_type, task_id)
     logger.debug(f"Last service record: {last_service_record}")
     
+    
     if last_service_record:
         last_service_date = pd.to_datetime(last_service_record['service_date'])
         serviced_at_value = last_service_record.get('serviced_at_value', 0)
     else:
-        last_service_date = datetime.now() - timedelta(days=365*5) 
+        # CRITICAL FIX: Use a static, non-volatile date to ensure cacheability.
+        last_service_date = datetime(2020, 1, 1)
         serviced_at_value = 0
         
     usage_predicted_date, time_predicted_date, final_predicted_date = None, None, None
@@ -251,22 +253,21 @@ def predict_service_date(entity_id, entity_type, task_id, custom_limit=None):
     elif time_predicted_date:
         final_predicted_date, due_reason = time_predicted_date, "Time Interval"
     
-    days_remaining = (final_predicted_date - datetime.now()).days if final_predicted_date else None
-    logger.info(f"Final prediction for {entity_id}/{task_id}: Date={final_predicted_date}, Days Remaining={days_remaining}, Reason={due_reason}")
+    logger.info(f"Final prediction for {entity_id}/{task_id}: Date={final_predicted_date}, Reason={due_reason}")
 
     return {
-        'entity_id': entity_id, 
-        'task_id': task_id, 
-        'unit': unit, 
-        'current_value': value_since_service,
-        'service_limit': service_limit, 
-        'service_interval_days': time_interval_days,
-        'last_service_date': last_service_date,
-        'avg_daily_usage': avg_daily_usage,
-        'days_remaining': days_remaining,
-        'predicted_date': final_predicted_date,
-        'action_required': action_required,
-        'due_reason': due_reason,
-        'duration_hours': duration_hours,
-        'error': None if final_predicted_date else "Prediction Unavailable"
-    }
+    'entity_id': entity_id,
+    'task_id': task_id,
+    'unit': unit,
+    'current_value': value_since_service,
+    'service_limit': service_limit,
+    'service_interval_days': time_interval_days,
+    'last_service_date': last_service_date,
+    'avg_daily_usage': avg_daily_usage,
+    # 'days_remaining' is now calculated in the dashboard
+    'predicted_date': final_predicted_date,
+    'action_required': action_required,
+    'due_reason': due_reason,
+    'duration_hours': duration_hours,
+    'error': None if final_predicted_date else "Prediction Unavailable"
+}

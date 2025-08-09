@@ -600,54 +600,53 @@ if 'last_update_check' not in st.session_state:
 
 # --- REVISED: Main Application Flow ---
 
+# Initialize database tables
 database.init_db()
 
-# Define the update interval (e.g., 1 hour = 3600 seconds)
-UPDATE_INTERVAL_SECONDS = 3600
+# Try to load predictions from our new persistent cache
+# The cache is considered 'stale' after 1 hour (3600 seconds)
+all_preds_df = database.load_predictions_from_cache(max_age_seconds=3600)
 
-time_since_last_check = (datetime.now(timezone.utc) - st.session_state.last_update_check).total_seconds()
-
-# Initial Load: If the main DataFrame is empty, do a full synchronous load.
-if st.session_state.all_preds_df.empty:
-    with st.spinner("Performing initial data load and predictions... Please wait."):
-        st.session_state.service_config = get_config()
-        st.session_state.all_preds_df = run_initial_predictions()
-        st.session_state.all_logs_df = database.get_all_service_logs()
-        st.session_state.all_windows_df = database.get_all_maintenance_windows()
-        st.session_state.data_loaded = True
-        st.session_state.last_update_check = datetime.now(timezone.utc)
+# If cache is empty or stale, we must re-compute
+if all_preds_df is None:
+    with st.spinner("Performing first-time data analysis... Please wait. This may take a few minutes."):
+        # Run the expensive prediction calculations
+        predictions_to_cache = run_initial_predictions()
+        
+        # Save the fresh results to our database cache for the next run
+        database.save_predictions_to_cache(predictions_to_cache)
+        
+        # Use these results for the current session
+        all_preds_df = predictions_to_cache
+        
+        # Rerun the script to ensure a clean display now that data is loaded
         st.rerun()
 
-# Incremental Update: If the hourly interval has passed, check for new data.
-elif time_since_last_check > UPDATE_INTERVAL_SECONDS:
-    st.toast("Checking for data updates...")
+# --- This point is reached instantly if the cache was successfully loaded ---
 
-    # Get the list of entities with new data since the last check
-    entities_to_update = database.get_entities_with_new_data(st.session_state.last_update_check.isoformat())
-
-    if entities_to_update.get('cranes') or entities_to_update.get('spreaders'):
-        with st.spinner("Updating predictions based on new data..."):
-            updated_preds_df = run_targeted_predictions(entities_to_update)
-
-            if not updated_preds_df.empty:
-                # Set index for efficient updating
-                main_df = st.session_state.all_preds_df.set_index(['entity_id', 'task_id'])
-                updated_df = updated_preds_df.set_index(['entity_id', 'task_id'])
-
-                # Update existing rows in the main dataframe with new data
-                main_df.update(updated_df)
-
-                # Reset index to restore original dataframe structure
-                st.session_state.all_preds_df = main_df.reset_index()
-                st.toast("Dashboard has been updated with new predictions! ✨")
-
-    # Always refresh logs and windows during an interval check
+# Load other dataframes. These are fast and can be loaded on each run.
+# REPLACE IT WITH THIS BLOCK
+# Load other dataframes and store them for the session
+if 'service_config' not in st.session_state:
+    st.session_state.service_config = get_config()
+if 'all_logs_df' not in st.session_state:
     st.session_state.all_logs_df = database.get_all_service_logs()
+if 'all_windows_df' not in st.session_state:
     st.session_state.all_windows_df = database.get_all_maintenance_windows()
 
-    # Update the check timestamp so it doesn't run again for another hour
-    st.session_state.last_update_check = datetime.now(timezone.utc)
-    st.rerun()
+# Assign to local variables for cleaner code in the rest of the app
+service_config = st.session_state.service_config
+all_logs_df = st.session_state.all_logs_df
+all_windows_df = st.session_state.all_windows_df
+
+# --- DYNAMIC CALCULATION (THE "ICING") ---
+if not all_preds_df.empty and 'predicted_date' in all_preds_df.columns:
+    preds_df_copy = all_preds_df.copy()
+    preds_df_copy['predicted_date'] = pd.to_datetime(preds_df_copy['predicted_date'], errors='coerce')
+    preds_df_copy['days_remaining'] = (preds_df_copy['predicted_date'] - datetime.now()).dt.days
+    all_preds_df = preds_df_copy
+# --- END OF DYNAMIC CALCULATION ---
+
 
 # --- Assign from Session State to make code cleaner ---
 service_config = st.session_state.service_config
@@ -655,7 +654,20 @@ all_preds_df = st.session_state.all_preds_df
 all_logs_df = st.session_state.all_logs_df
 all_windows_df = st.session_state.all_windows_df
 
-# --- END OF PASTED BLOCK ---
+# --- DYNAMIC CALCULATION (THE "ICING") ---
+# This part runs on every page load, but it's extremely fast.
+# It adds the 'days_remaining' column to our now-cached data.
+if not all_preds_df.empty and 'predicted_date' in all_preds_df.columns:
+    # Ensure the date column is in the correct format
+    preds_df_copy = all_preds_df.copy()
+    preds_df_copy['predicted_date'] = pd.to_datetime(preds_df_copy['predicted_date'], errors='coerce')
+
+    # Calculate the difference in days from today
+    preds_df_copy['days_remaining'] = (preds_df_copy['predicted_date'] - datetime.now()).dt.days
+
+    # Overwrite the main dataframe with the dynamically updated one
+    all_preds_df = preds_df_copy
+# --- END OF DYNAMIC CALCULATION ---
 
 # --- Main App UI ---
 st.title("🏗️ Crane & Spreader Maintenance Dashboard")
