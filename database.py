@@ -405,3 +405,74 @@ def get_spreader_location_history(spreader_id: str):
     except Exception as e:
         logger.error(f"Error getting spreader location history for ID {spreader_id}: {e}", exc_info=True)
         return pd.DataFrame()
+
+
+def get_entities_with_new_data(since_timestamp: str):
+    """
+    Identifies cranes and spreaders that have new statistical data since the given timestamp.
+
+    Args:
+        since_timestamp (str): An ISO format timestamp string.
+
+    Returns:
+        dict: A dictionary with two keys, 'cranes' and 'spreaders', containing lists
+              of their respective IDs that need updating.
+    """
+    logger.info(f"Checking for entities with new data since {since_timestamp}")
+    entities_to_update = {'cranes': set(), 'spreaders': set()}
+
+    try:
+        with sqlite3.connect(Paths.DATABASE_PATH) as conn:
+            # 1. Find all cranes with new raw data since the last check
+            crane_query = f"""
+                SELECT DISTINCT crane_number
+                FROM {Settings.STATS_TABLE_NAME}
+                WHERE timestamp > ?
+            """
+            new_data_cranes_df = pd.read_sql_query(crane_query, conn, params=(since_timestamp,))
+
+            if new_data_cranes_df.empty:
+                logger.info("No new stat entries found. No updates needed.")
+                return {'cranes': [], 'spreaders': []}
+
+            cranes_with_new_data = set(new_data_cranes_df['crane_number'].unique())
+            entities_to_update['cranes'].update(cranes_with_new_data)
+            logger.debug(f"Found {len(cranes_with_new_data)} cranes with new raw stats: {cranes_with_new_data}")
+
+            # 2. For those cranes, find out which spreaders are currently attached to them
+            if not cranes_with_new_data:
+                return {'cranes': [], 'spreaders': []}
+
+            placeholders = ','.join('?' for _ in cranes_with_new_data)
+            spreader_query = f"""
+                WITH LatestSpreader AS (
+                    SELECT
+                        crane_number,
+                        tag_value,
+                        ROW_NUMBER() OVER (PARTITION BY crane_number ORDER BY timestamp DESC) as rn
+                    FROM {Settings.STATS_TABLE_NAME}
+                    WHERE tag_name = 'Spreader ID Number' AND crane_number IN ({placeholders})
+                )
+                SELECT DISTINCT tag_value
+                FROM LatestSpreader
+                WHERE rn = 1 AND tag_value IS NOT NULL
+            """
+            params = list(cranes_with_new_data)
+            affected_spreaders_df = pd.read_sql_query(spreader_query, conn, params=params)
+
+            if not affected_spreaders_df.empty:
+                affected_spreader_ids = set(affected_spreaders_df['tag_value'].astype(int).unique())
+                entities_to_update['spreaders'].update(affected_spreader_ids)
+                logger.debug(f"Found {len(affected_spreader_ids)} associated spreaders to update: {affected_spreader_ids}")
+
+    except Exception as e:
+        logger.error(f"DB Error while checking for new entity data: {e}", exc_info=True)
+        return {'cranes': [], 'spreaders': []}
+
+    # Convert sets to lists before returning
+    final_updates = {
+        'cranes': list(entities_to_update['cranes']),
+        'spreaders': list(entities_to_update['spreaders'])
+    }
+    logger.info(f"Entities requiring an update: {final_updates}")
+    return final_updates

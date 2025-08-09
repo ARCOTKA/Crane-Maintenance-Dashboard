@@ -8,6 +8,7 @@ import altair as alt
 import os
 import sqlite3
 from config import Paths, Settings, logger # Import from the new centralized config
+from datetime import datetime, timezone
 
 
 # --- Global Configuration ---
@@ -427,21 +428,87 @@ def _validate_maintenance_plan(df):
     return valid_records, duplicate_records, error_records
 
 
-# --- Initialize Session State & Data Loading ---
-def load_all_data(force_predictions=False):
-    """Loads all necessary data into the session state."""
-    logger.info(f"Executing load_all_data(force_predictions={force_predictions}).")
-    
-    if 'service_config' not in st.session_state:
-        st.session_state.service_config = prediction_engine.load_service_config()
 
-    if force_predictions or 'all_preds_df' not in st.session_state:
-        with st.spinner("Running global predictions for all cranes and spreaders..."):
-            st.session_state.all_preds_df = run_all_predictions()
-    
-    st.session_state.all_logs_df = database.get_all_service_logs()
-    st.session_state.all_windows_df = database.get_all_maintenance_windows()
-    st.session_state.data_loaded = True
+
+@st.cache_data(ttl=300)
+def run_initial_predictions():
+    """Runs predictions for ALL cranes and spreaders. Used for the first page load."""
+    logger.info("Executing run_initial_predictions() for all cranes and spreaders.")
+    # ... (The code here is IDENTICAL to your existing run_all_predictions function) ...
+    config = get_config()
+    if config is None:
+        return pd.DataFrame()
+
+    all_preds = []
+    crane_internal_names = [internal for display, internal in DISPLAY_TO_INTERNAL_NAME.items() if 'RMG' in internal]
+    crane_tasks_df = config[config['category'] != 'Spreader']
+    for task_id in crane_tasks_df.index:
+        for internal_name in crane_internal_names:
+            pred = prediction_engine.predict_service_date(internal_name, 'crane', task_id)
+            if pred: pred['entity_type'] = 'crane'
+            all_preds.append(pred)
+
+    spreader_tasks_df = config[config['category'] == 'Spreader']
+    for display_name, numeric_id in DISPLAY_TO_NUMERIC_ID.items():
+        for task_id in spreader_tasks_df.index:
+            pred = prediction_engine.predict_service_date(numeric_id, 'spreader', task_id)
+            if pred: pred['entity_type'] = 'spreader'
+            all_preds.append(pred)
+
+    preds_df = pd.DataFrame([p for p in all_preds if p is not None and not p.get('error')])
+    if preds_df.empty: return pd.DataFrame()
+
+    def map_id_to_display_name(row):
+        if row['entity_type'] == 'crane': return INTERNAL_TO_DISPLAY_NAME.get(row['entity_id'], row['entity_id'])
+        elif row['entity_type'] == 'spreader': return NUMERIC_ID_TO_DISPLAY_NAME.get(int(row['entity_id']), row['entity_id'])
+        return row['entity_id']
+
+    preds_df['entity_display_name'] = preds_df.apply(map_id_to_display_name, axis=1)
+    if 'crane' in preds_df.columns: preds_df.drop(columns=['crane'], inplace=True)
+    logger.info(f"Successfully generated {len(preds_df)} initial predictions.")
+    return preds_df
+
+
+def run_targeted_predictions(entities_to_update: dict):
+    """Runs predictions only for the specified list of cranes and spreaders."""
+    if not entities_to_update.get('cranes') and not entities_to_update.get('spreaders'):
+        logger.info("run_targeted_predictions called with no entities to update.")
+        return pd.DataFrame()
+
+    logger.info(f"Executing targeted predictions for: {entities_to_update}")
+    config = get_config()
+    if config is None: return pd.DataFrame()
+    all_preds = []
+
+    # Predict for specific cranes that have new data
+    if entities_to_update.get('cranes'):
+        crane_tasks_df = config[config['category'] != 'Spreader']
+        for task_id in crane_tasks_df.index:
+            for internal_name in entities_to_update['cranes']:
+                pred = prediction_engine.predict_service_date(internal_name, 'crane', task_id)
+                if pred: pred['entity_type'] = 'crane'
+                all_preds.append(pred)
+
+    # Predict for specific spreaders that were on cranes with new data
+    if entities_to_update.get('spreaders'):
+        spreader_tasks_df = config[config['category'] == 'Spreader']
+        for task_id in spreader_tasks_df.index:
+            for numeric_id in entities_to_update['spreaders']:
+                pred = prediction_engine.predict_service_date(numeric_id, 'spreader', task_id)
+                if pred: pred['entity_type'] = 'spreader'
+                all_preds.append(pred)
+
+    preds_df = pd.DataFrame([p for p in all_preds if p is not None and not p.get('error')])
+    if not preds_df.empty:
+        def map_id_to_display_name(row):
+            if row['entity_type'] == 'crane': return INTERNAL_TO_DISPLAY_NAME.get(row['entity_id'], row['entity_id'])
+            elif row['entity_type'] == 'spreader': return NUMERIC_ID_TO_DISPLAY_NAME.get(int(row['entity_id']), row['entity_id'])
+            return row['entity_id']
+        preds_df['entity_display_name'] = preds_df.apply(map_id_to_display_name, axis=1)
+        logger.info(f"Successfully generated {len(preds_df)} targeted predictions.")
+    return preds_df
+
+# --- END OF PASTED BLOCK ---
 
 @st.cache_data
 def get_config(): return prediction_engine.load_service_config()
@@ -516,22 +583,79 @@ if 'selected_spreader' not in st.session_state: st.session_state.selected_spread
 if 'valid_records' not in st.session_state: st.session_state['valid_records'] = []
 if 'duplicate_records' not in st.session_state: st.session_state['duplicate_records'] = []
 if 'error_records' not in st.session_state: st.session_state['error_records'] = []
+# ---> PASTE THE NEW CODE HERE <---
+
+# NEW: Add state for tracking updates
+if 'all_preds_df' not in st.session_state:
+    st.session_state.all_preds_df = pd.DataFrame()
+
+if 'last_update_check' not in st.session_state:
+    # Initialize with a time in the past to ensure the first check runs
+    st.session_state.last_update_check = datetime.now(timezone.utc) - timedelta(days=1)
 
 
 # FIX: Move database initialization to be the first step in the main app logic
 # to prevent module loading race conditions.
+# --- PASTE THIS NEW CODE IN ITS PLACE ---
+
+# --- REVISED: Main Application Flow ---
+
 database.init_db()
 
-if not st.session_state.data_loaded or st.session_state.get('force_data_reload', False):
-    load_all_data(force_predictions=True)
-    st.session_state.force_data_reload = False
+# Define the update interval (e.g., 1 hour = 3600 seconds)
+UPDATE_INTERVAL_SECONDS = 3600
 
+time_since_last_check = (datetime.now(timezone.utc) - st.session_state.last_update_check).total_seconds()
+
+# Initial Load: If the main DataFrame is empty, do a full synchronous load.
+if st.session_state.all_preds_df.empty:
+    with st.spinner("Performing initial data load and predictions... Please wait."):
+        st.session_state.service_config = get_config()
+        st.session_state.all_preds_df = run_initial_predictions()
+        st.session_state.all_logs_df = database.get_all_service_logs()
+        st.session_state.all_windows_df = database.get_all_maintenance_windows()
+        st.session_state.data_loaded = True
+        st.session_state.last_update_check = datetime.now(timezone.utc)
+        st.rerun()
+
+# Incremental Update: If the hourly interval has passed, check for new data.
+elif time_since_last_check > UPDATE_INTERVAL_SECONDS:
+    st.toast("Checking for data updates...")
+
+    # Get the list of entities with new data since the last check
+    entities_to_update = database.get_entities_with_new_data(st.session_state.last_update_check.isoformat())
+
+    if entities_to_update.get('cranes') or entities_to_update.get('spreaders'):
+        with st.spinner("Updating predictions based on new data..."):
+            updated_preds_df = run_targeted_predictions(entities_to_update)
+
+            if not updated_preds_df.empty:
+                # Set index for efficient updating
+                main_df = st.session_state.all_preds_df.set_index(['entity_id', 'task_id'])
+                updated_df = updated_preds_df.set_index(['entity_id', 'task_id'])
+
+                # Update existing rows in the main dataframe with new data
+                main_df.update(updated_df)
+
+                # Reset index to restore original dataframe structure
+                st.session_state.all_preds_df = main_df.reset_index()
+                st.toast("Dashboard has been updated with new predictions! ✨")
+
+    # Always refresh logs and windows during an interval check
+    st.session_state.all_logs_df = database.get_all_service_logs()
+    st.session_state.all_windows_df = database.get_all_maintenance_windows()
+
+    # Update the check timestamp so it doesn't run again for another hour
+    st.session_state.last_update_check = datetime.now(timezone.utc)
+    st.rerun()
 
 # --- Assign from Session State to make code cleaner ---
 service_config = st.session_state.service_config
 all_preds_df = st.session_state.all_preds_df
 all_logs_df = st.session_state.all_logs_df
 all_windows_df = st.session_state.all_windows_df
+
+# --- END OF PASTED BLOCK ---
 
 # --- Main App UI ---
 st.title("🏗️ Crane & Spreader Maintenance Dashboard")
