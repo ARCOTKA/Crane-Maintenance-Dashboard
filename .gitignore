@@ -4,3 +4,5 @@ __pycache__/
 
 # Log and database files
 debug.txt
+crane_data.db
+Run_dashboard.bat
